@@ -1212,8 +1212,9 @@ router.post("/telegram/admin/requests/:type/:id/:action", async (req, res) => {
 });
 
 function parseTelebirrDepositSms(text: string) {
-  const amountMatch = text.match(/([0-9]+(?:\.[0-9]{1,2})?)\s*ብር/);
-  const transactionMatch = text.match(/የሂሳብ\s+እንቅስቃሴ\s+ቁጥርዎ\s+([A-Z0-9]+)/i);
+  const normalizedText = text.replace(/\r\n/g, "\n").replace(/\s+/g, " ").trim();
+  const amountMatch = normalizedText.match(/([0-9]+(?:\.[0-9]{1,2})?)\s*ብር/);
+  const transactionMatch = normalizedText.match(/(?:የሂሳብ\s+እንቅስቃሴ\s+ቁጥርዎ|transaction\s*(?:id|number))\s*[:#]?\s*([A-Z0-9]+)/i);
   if (!amountMatch || !transactionMatch) return undefined;
   const amount = Number(amountMatch[1]);
   if (!Number.isFinite(amount) || amount <= 0) return undefined;
@@ -1226,10 +1227,11 @@ router.post("/telegram/sms-webhook", async (req, res) => {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
-  const body = req.body as { message?: unknown; text?: unknown; sender?: unknown };
-  const message = typeof body.message === "string" ? body.message : typeof body.text === "string" ? body.text : "";
+  const body = (req.body && typeof req.body === "object" ? req.body : {}) as Record<string, unknown>;
+  const message = ["message", "msg", "text", "body", "messageBody", "content"].map((key) => body[key]).find((value): value is string => typeof value === "string") ?? Object.values(body).filter((value): value is string => typeof value === "string").join("\\n");
+  const sender = ["sender", "from", "incomingNumber", "senderNumber"].map((key) => body[key]).find((value): value is string => typeof value === "string") ?? message.match(/(?:from|sender)\s*:?\s*(\+?[0-9]+)/i)?.[1];
   const allowedSender = process.env["TELEGRAM_SMS_SENDER"]?.trim();
-  if (allowedSender && body.sender !== allowedSender) {
+  if (allowedSender && sender && sender !== allowedSender) {
     res.status(202).json({ matched: false });
     return;
   }
