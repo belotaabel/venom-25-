@@ -1211,6 +1211,48 @@ router.post("/telegram/admin/requests/:type/:id/:action", async (req, res) => {
   res.json({ success: true });
 });
 
+function parseTelebirrDepositSms(text: string) {
+  const amountMatch = text.match(/([0-9]+(?:\.[0-9]{1,2})?)\s*ብር/);
+  const transactionMatch = text.match(/የሂሳብ\s+እንቅስቃሴ\s+ቁጥርዎ\s+([A-Z0-9]+)/i);
+  if (!amountMatch || !transactionMatch) return undefined;
+  const amount = Number(amountMatch[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return undefined;
+  return { amount: amount.toFixed(2), transactionId: transactionMatch[1].toUpperCase() };
+}
+
+router.post("/telegram/sms-webhook", async (req, res) => {
+  const configuredSecret = process.env["TELEGRAM_SMS_WEBHOOK_SECRET"]?.trim();
+  if (!configuredSecret || req.header("x-sms-webhook-secret") !== configuredSecret) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const body = req.body as { message?: unknown; text?: unknown; sender?: unknown };
+  const message = typeof body.message === "string" ? body.message : typeof body.text === "string" ? body.text : "";
+  const allowedSender = process.env["TELEGRAM_SMS_SENDER"]?.trim();
+  if (allowedSender && body.sender !== allowedSender) {
+    res.status(202).json({ matched: false });
+    return;
+  }
+  const parsed = parseTelebirrDepositSms(message);
+  if (!parsed) {
+    res.status(400).json({ error: "Unsupported Telebirr SMS format" });
+    return;
+  }
+  const [request] = await db.select({ id: depositRequests.id, amount: depositRequests.amount }).from(depositRequests)
+    .where(and(eq(depositRequests.status, "pending"), eq(depositRequests.transactionId, parsed.transactionId))).for("update").limit(1);
+  if (!request || Number(request.amount).toFixed(2) !== parsed.amount) {
+    res.status(202).json({ matched: false, transactionId: parsed.transactionId });
+    return;
+  }
+  const adminChatId = getAdminChatId();
+  if (!adminChatId) {
+    res.status(503).json({ error: "TELEGRAM_ADMIN_CHAT_ID is not configured" });
+    return;
+  }
+  await processAdminDecision("deposit", "approve", request.id, adminChatId);
+  res.json({ matched: true, requestId: request.id, amount: parsed.amount, transactionId: parsed.transactionId });
+});
+
 function sleep(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
