@@ -27,3 +27,4 @@ export * from "./leaderboard";
 export * from "./app-wallet-transactions";
 export * from "./telegram-referrals";
 export * from "./game-settings";
+export * from "./promo-codes";

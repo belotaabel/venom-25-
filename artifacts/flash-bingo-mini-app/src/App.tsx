@@ -1003,6 +1003,7 @@ type AdminRequest = {
 
 type AdminRequestType = 'deposit' | 'withdrawal';
 type AdminAction = 'approve' | 'reject';
+type AdminPromo = { id: number; code: string; rewardAmount: string; maxRedemptions: number | null; redemptionCount: number; isActive: boolean; expiresAt: string | null };
 type AdminGameSettings = {
   registrationBonus: string;
   inviteBonus: string;
@@ -1025,32 +1026,41 @@ function AdminPanel() {
   const [telegramReady, setTelegramReady] = useState(false);
   const [error, setError] = useState('');
   const [actionKey, setActionKey] = useState('');
+  const [promos, setPromos] = useState<AdminPromo[]>([]);
+  const [promoCode, setPromoCode] = useState('');
+  const [promoReward, setPromoReward] = useState('');
+  const [promoLimit, setPromoLimit] = useState('');
+  const [promoExpiresAt, setPromoExpiresAt] = useState('');
   const [broadcastPhoto, setBroadcastPhoto] = useState<File | null>(null);
   const [broadcastCaption, setBroadcastCaption] = useState('');
   const [broadcastResult, setBroadcastResult] = useState('');
 
   const loadRequests = async () => {
     setError('');
-    const [requestResponse, settingsResponse] = await Promise.all([
+    const [requestResponse, settingsResponse, promosResponse] = await Promise.all([
       fetch(`${getApiUrl()}/api/telegram/admin/requests`, { headers: telegramHeaders() }),
       fetch(`${getApiUrl()}/api/telegram/admin/settings`, { headers: telegramHeaders() }),
+      fetch(`${getApiUrl()}/api/telegram/admin/promos`, { headers: telegramHeaders() }),
     ]);
-    if (requestResponse.status === 401 || settingsResponse.status === 401) {
+    if (requestResponse.status === 401 || settingsResponse.status === 401 || promosResponse.status === 401) {
       setStatus('auth-required');
       return;
     }
-    if (requestResponse.status === 403 || settingsResponse.status === 403) {
+    if (requestResponse.status === 403 || settingsResponse.status === 403 || promosResponse.status === 403) {
       setStatus('denied');
       return;
     }
-    const [data, settings] = await Promise.all([
+    const [data, settings, promoData] = await Promise.all([
       requestResponse.json() as Promise<{ deposits?: AdminRequest[]; withdrawals?: AdminRequest[]; appWalletBalance?: string; error?: string }>,
       settingsResponse.json() as Promise<AdminGameSettings & { error?: string }>,
+      promosResponse.json() as Promise<AdminPromo[] & { error?: string }>,
     ]);
     if (!requestResponse.ok) throw new Error(data.error ?? 'የአድሚን መረጃ መጫን አልተቻለም።');
     if (!settingsResponse.ok) throw new Error(settings.error ?? 'የቅንብሮች መጫን አልተቻለም።');
+    if (!promosResponse.ok) throw new Error(promoData.error ?? 'Promo Code መጫን አልተቻለም።');
     setRequests({ deposits: data.deposits ?? [], withdrawals: data.withdrawals ?? [], appWalletBalance: data.appWalletBalance ?? '0.00' });
     setGameSettings(settings);
+    setPromos(promoData);
     setStatus('ready');
   };
 
@@ -1128,6 +1138,34 @@ function AdminPanel() {
     } finally {
       setActionKey('');
     }
+  };
+
+  const createPromo = async () => {
+    setActionKey('promo-create');
+    setError('');
+    try {
+      const response = await fetch(`${getApiUrl()}/api/telegram/admin/promos`, { method: 'POST', headers: { 'content-type': 'application/json', ...telegramHeaders() }, body: JSON.stringify({ code: promoCode, rewardAmount: promoReward, maxRedemptions: promoLimit, expiresAt: promoExpiresAt || null }) });
+      const data = await response.json() as AdminPromo & { error?: string };
+      if (!response.ok) throw new Error(data.error ?? 'Promo Code መፍጠር አልተቻለም።');
+      setPromoCode(''); setPromoReward(''); setPromoLimit(''); setPromoExpiresAt('');
+      await loadRequests();
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : 'Promo Code መፍጠር አልተቻለም።');
+    } finally { setActionKey(''); }
+  };
+
+  const togglePromo = async (promo: AdminPromo) => {
+    setActionKey(`promo-${promo.id}`);
+    setError('');
+    try {
+      const action = promo.isActive ? 'deactivate' : 'activate';
+      const response = await fetch(`${getApiUrl()}/api/telegram/admin/promos/${promo.id}/${action}`, { method: 'POST', headers: telegramHeaders() });
+      const data = await response.json() as AdminPromo & { error?: string };
+      if (!response.ok) throw new Error(data.error ?? 'Promo Code ሁኔታ መቀየር አልተቻለም።');
+      setPromos((current) => current.map((item) => item.id === promo.id ? data : item));
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : 'Promo Code ሁኔታ መቀየር አልተቻለም።');
+    } finally { setActionKey(''); }
   };
 
   const sendBroadcast = async () => {
@@ -1220,6 +1258,20 @@ function AdminPanel() {
           <p className="mt-3 text-[11px] text-[hsl(var(--muted-foreground))]">የሊደርቦርድ 1ኛ፣ 2ኛ እና 3ኛ ድርሻ በድምር 100% መሆን አለበት።</p>
           <button type="button" data-testid="button-save-game-settings" disabled={actionKey === 'settings'} onClick={() => void saveSettings()} className="depth-action mt-4 w-full rounded-xl bg-[hsl(var(--accent))] px-3 py-3 text-xs font-extrabold text-[hsl(var(--accent-foreground))] shadow-[0_4px_0_hsl(128_65%_30%)] transition-transform active:translate-y-1 active:shadow-none disabled:cursor-wait disabled:opacity-60">{actionKey === 'settings' ? 'በማስቀመጥ ላይ...' : 'ቅንብሮችን አስቀምጥ'}</button>
         </section>}
+        <section className="depth-card rounded-2xl border border-[hsl(var(--primary)/.35)] bg-[hsl(var(--primary)/.08)] p-4">
+          <div className="mb-4">
+            <p className="text-[10px] font-bold uppercase tracking-[.12em] text-[hsl(var(--primary))]">PROMO CODES</p>
+            <h2 className="mt-1 text-sm font-extrabold">Promo Code መፍጠሪያ እና አክቲቭ ማድረጊያ</h2>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <input value={promoCode} onChange={(event) => setPromoCode(event.target.value)} placeholder="CODE2026" className="rounded-xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] px-3 py-3 text-sm font-bold uppercase text-[hsl(var(--foreground))] outline-none placeholder:text-[hsl(var(--muted-foreground))]" />
+            <input type="number" min="0.01" step="0.01" value={promoReward} onChange={(event) => setPromoReward(event.target.value)} placeholder="Reward ETB" className="rounded-xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] px-3 py-3 text-sm font-bold text-[hsl(var(--foreground))] outline-none placeholder:text-[hsl(var(--muted-foreground))]" />
+            <input type="number" min="1" step="1" value={promoLimit} onChange={(event) => setPromoLimit(event.target.value)} placeholder="Max uses (optional)" className="rounded-xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] px-3 py-3 text-sm font-bold text-[hsl(var(--foreground))] outline-none placeholder:text-[hsl(var(--muted-foreground))]" />
+            <input type="datetime-local" value={promoExpiresAt} onChange={(event) => setPromoExpiresAt(event.target.value)} className="rounded-xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] px-3 py-3 text-xs font-bold text-[hsl(var(--foreground))] outline-none" />
+          </div>
+          <button type="button" disabled={actionKey === 'promo-create' || !promoCode.trim() || !promoReward.trim()} onClick={() => void createPromo()} className="depth-action mt-3 w-full rounded-xl bg-[hsl(var(--primary))] px-3 py-3 text-xs font-extrabold text-[hsl(var(--primary-foreground))] shadow-[0_4px_0_hsl(45_70%_30%)] disabled:cursor-wait disabled:opacity-60">{actionKey === 'promo-create' ? 'በመፍጠር ላይ...' : '➕ Promo Code ፍጠር'}</button>
+          <div className="mt-4 space-y-2">{promos.length ? promos.map((promo) => <div key={promo.id} className="flex items-center justify-between gap-2 rounded-xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] p-3"><div className="min-w-0"><p className="font-mono text-sm font-extrabold text-[hsl(var(--primary))]">{promo.code}</p><p className="text-[11px] text-[hsl(var(--muted-foreground))]">{promo.rewardAmount} ETB · {promo.redemptionCount}{promo.maxRedemptions ? `/${promo.maxRedemptions}` : ''} uses</p></div><button type="button" disabled={actionKey === `promo-${promo.id}`} onClick={() => void togglePromo(promo)} className={`rounded-lg px-2.5 py-2 text-[10px] font-extrabold ${promo.isActive ? 'bg-[hsl(var(--destructive))] text-white' : 'bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]'}`}>{promo.isActive ? 'DEACTIVATE' : 'ACTIVATE'}</button></div>) : <p className="text-xs text-[hsl(var(--muted-foreground))]">ምንም Promo Code የለም።</p>}</div>
+        </section>
         <section className="depth-card rounded-2xl border border-[hsl(var(--accent)/.35)] bg-[hsl(var(--accent)/.08)] p-4">
           <div className="mb-4">
             <p className="text-[10px] font-bold uppercase tracking-[.12em] text-[hsl(var(--accent))]">TELEGRAM BROADCAST</p>

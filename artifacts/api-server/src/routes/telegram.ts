@@ -5,6 +5,8 @@ import {
   db,
   depositRequests,
   gameSettings,
+  promoCodes,
+  promoRedemptions,
   telegramReferrals,
   telegramUsers,
   walletTransactions,
@@ -64,6 +66,7 @@ type WithdrawalSession =
 
 const depositSessions = new Map<number, DepositSession>();
 const withdrawalSessions = new Map<number, WithdrawalSession>();
+const promoSessions = new Set<number>();
 const SUPPORT_USERNAME = "@******bingosupport";
 const TELEBIRR_ACCOUNT_NUMBER = "0964846006";
 
@@ -775,12 +778,25 @@ async function handleTelegramUpdate(update: TelegramUpdate) {
     return;
   }
 
-  if (text === "🎁 Promo Code") {
+  if (text === "🎁 Promo Code" || text === "/promo") {
+    promoSessions.add(message.chat.id);
     await telegramRequest("sendMessage", {
       chat_id: message.chat.id,
-      text: "ይህ አማራጭ በቅርቡ ይገኛል።",
+      text: "እባክዎ Promo Code ያስገቡ።",
+      reply_markup: { force_reply: true },
+    });
+    return;
+  }
+
+  if (promoSessions.has(message.chat.id)) {
+    promoSessions.delete(message.chat.id);
+    const result = await redeemPromoCode(message.from?.id ?? 0, text);
+    await telegramRequest("sendMessage", {
+      chat_id: message.chat.id,
+      text: result.ok ? `🎉 እንኳን ደስ አለዎት! ${result.amount} ብር ወደ Play Wallet ተጨምሯል።` : promoFailureMessage(result.reason),
       reply_markup: getMainKeyboard(message.chat.id),
     });
+    return;
   }
 }
 
@@ -863,6 +879,60 @@ router.post("/telegram/auth", async (req, res) => {
   res.json({ user, profile, isAdmin: user.id === getAdminUserId() });
 });
 
+type PromoRedeemResult =
+  | { ok: true; amount: string }
+  | { ok: false; reason: "invalid" | "inactive" | "expired" | "limit" | "already" | "unregistered" };
+
+function normalizePromoCode(value: string) {
+  return value.trim().toUpperCase();
+}
+
+async function redeemPromoCode(telegramId: number, code: string): Promise<PromoRedeemResult> {
+  const normalizedCode = normalizePromoCode(code);
+  if (!normalizedCode) return { ok: false, reason: "invalid" };
+  return db.transaction(async (tx) => {
+    const [promo] = await tx.select().from(promoCodes).where(eq(promoCodes.code, normalizedCode)).for("update").limit(1);
+    if (!promo) return { ok: false, reason: "invalid" };
+    if (!promo.isActive) return { ok: false, reason: "inactive" };
+    if (promo.expiresAt && promo.expiresAt.getTime() <= Date.now()) return { ok: false, reason: "expired" };
+    if (promo.maxRedemptions !== null && promo.redemptionCount >= promo.maxRedemptions) return { ok: false, reason: "limit" };
+    const [user] = await tx.select().from(telegramUsers).where(eq(telegramUsers.telegramId, telegramId)).for("update").limit(1);
+    if (!user) return { ok: false, reason: "unregistered" };
+    const [existing] = await tx.select({ id: promoRedemptions.id }).from(promoRedemptions)
+      .where(and(eq(promoRedemptions.promoCodeId, promo.id), eq(promoRedemptions.telegramId, telegramId))).limit(1);
+    if (existing) return { ok: false, reason: "already" };
+    const before = Number(user.playWalletBalance);
+    const amount = Number(promo.rewardAmount).toFixed(2);
+    const after = (before + Number(amount)).toFixed(2);
+    const [redemption] = await tx.insert(promoRedemptions).values({ promoCodeId: promo.id, telegramId, rewardAmount: amount }).returning({ id: promoRedemptions.id });
+    const reference = `promo:${promo.id}:user:${telegramId}`;
+    await tx.insert(walletTransactions).values({
+      telegramId,
+      type: "adjustment",
+      amount,
+      balanceBefore: before.toFixed(2),
+      balanceAfter: after,
+      status: "completed",
+      reference,
+      metadata: { source: "promo_code", promoCodeId: promo.id, redemptionId: redemption.id },
+    });
+    await tx.update(telegramUsers).set({ playWalletBalance: after, updatedAt: new Date() }).where(eq(telegramUsers.telegramId, telegramId));
+    await tx.update(promoCodes).set({ redemptionCount: promo.redemptionCount + 1, updatedAt: new Date() }).where(eq(promoCodes.id, promo.id));
+    return { ok: true, amount };
+  });
+}
+
+function promoFailureMessage(reason: Exclude<PromoRedeemResult, { ok: true }>["reason"]) {
+  return {
+    invalid: "የPromo Code ኮዱ ትክክል አይደለም።",
+    inactive: "ይህ Promo Code አሁን አክቲቭ አይደለም።",
+    expired: "ይህ Promo Code ጊዜው አልፎበታል።",
+    limit: "የዚህ Promo Code አጠቃቀም ቁጥር ሙሉ ሆኗል።",
+    already: "ይህን Promo Code ቀደም ብለው ተጠቅመዋል።",
+    unregistered: "እባክዎ መጀመሪያ ይመዝገቡ።",
+  }[reason];
+}
+
 function requireAdmin(req: Request, res: Response) {
   const user = getAuthenticatedTelegramUser(req);
   if (!user) {
@@ -900,6 +970,66 @@ function parseEditableGameSettings(value: unknown): EditableGameSettings | undef
     ...Object.fromEntries(pointFields.map((field) => [field, parsedPoints[field].toFixed(2)])),
   } as EditableGameSettings;
 }
+
+router.post("/telegram/promo/redeem", async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: "Valid Telegram authentication is required" });
+    return;
+  }
+  const code = typeof req.body?.code === "string" ? req.body.code : "";
+  const result = await redeemPromoCode(user.id, code);
+  if (!result.ok) {
+    res.status(400).json({ error: promoFailureMessage(result.reason) });
+    return;
+  }
+  res.json({ success: true, amount: result.amount });
+});
+
+router.get("/telegram/admin/promos", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  res.json(await db.select().from(promoCodes).orderBy(desc(promoCodes.createdAt)));
+});
+
+router.post("/telegram/admin/promos", async (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const body = req.body as { code?: unknown; rewardAmount?: unknown; maxRedemptions?: unknown; expiresAt?: unknown };
+  const code = typeof body.code === "string" ? normalizePromoCode(body.code) : "";
+  const rewardAmount = typeof body.rewardAmount === "string" || typeof body.rewardAmount === "number" ? Number(body.rewardAmount) : NaN;
+  const maxRedemptions = body.maxRedemptions === "" || body.maxRedemptions === null || body.maxRedemptions === undefined ? null : Number(body.maxRedemptions);
+  const expiresAt = body.expiresAt ? new Date(String(body.expiresAt)) : null;
+  if (!/^[A-Z0-9_-]{3,64}$/.test(code) || !Number.isFinite(rewardAmount) || rewardAmount <= 0 || rewardAmount > 100_000 || (maxRedemptions !== null && (!Number.isSafeInteger(maxRedemptions) || maxRedemptions < 1)) || (expiresAt && Number.isNaN(expiresAt.getTime()))) {
+    res.status(400).json({ error: "Enter a valid code, reward amount, redemption limit, and expiration date." });
+    return;
+  }
+  try {
+    const [promo] = await db.insert(promoCodes).values({ code, rewardAmount: rewardAmount.toFixed(2), maxRedemptions, expiresAt, createdByTelegramId: admin.user.id, isActive: false }).returning();
+    res.status(201).json(promo);
+  } catch (error) {
+    if (error instanceof Error && /promo_codes_code_idx|duplicate key/i.test(error.message)) {
+      res.status(409).json({ error: "ይህ Promo Code አስቀድሞ አለ።" });
+      return;
+    }
+    throw error;
+  }
+});
+
+router.post("/telegram/admin/promos/:id/:action", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const id = Number(req.params.id);
+  const action = req.params.action;
+  if (!Number.isSafeInteger(id) || id <= 0 || (action !== "activate" && action !== "deactivate")) {
+    res.status(400).json({ error: "Invalid promo action" });
+    return;
+  }
+  const [promo] = await db.update(promoCodes).set({ isActive: action === "activate", updatedAt: new Date() }).where(eq(promoCodes.id, id)).returning();
+  if (!promo) {
+    res.status(404).json({ error: "Promo Code not found" });
+    return;
+  }
+  res.json(promo);
+});
 
 router.post("/telegram/admin/broadcast", async (req, res) => {
   const admin = requireAdmin(req, res);
