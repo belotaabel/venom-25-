@@ -885,6 +885,41 @@ function parseEditableGameSettings(value: unknown): EditableGameSettings | undef
   } as EditableGameSettings;
 }
 
+router.post("/telegram/admin/broadcast", async (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const body = req.body as { photo?: unknown; caption?: unknown };
+  const photo = typeof body.photo === "string" ? body.photo.trim() : "";
+  const caption = typeof body.caption === "string" ? body.caption.trim() : "";
+  const webAppUrl = getWebAppUrl();
+  if (!photo || photo.length > 2_000 || !caption || caption.length > 1_024 || !webAppUrl) {
+    res.status(400).json({ error: "Enter an image URL or Telegram file ID, message text, and configure the web app URL." });
+    return;
+  }
+
+  const recipients = await db.select({ chatId: telegramUsers.chatId }).from(telegramUsers);
+  const chatIds = [...new Set(recipients.map(({ chatId }) => chatId))];
+  let sent = 0;
+  let failed = 0;
+  for (const chatId of chatIds) {
+    try {
+      await telegramRequest("sendPhoto", {
+        chat_id: chatId,
+        photo,
+        caption,
+        reply_markup: {
+          inline_keyboard: [[{ text: "Play Now", web_app: { url: webAppUrl } }]],
+        },
+      });
+      sent += 1;
+    } catch (error) {
+      failed += 1;
+      logger.warn({ err: error, chatId }, "Telegram broadcast delivery failed");
+    }
+  }
+  res.json({ targeted: chatIds.length, sent, failed });
+});
+
 router.get("/telegram/admin/settings", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   res.json(await getGameSettings());

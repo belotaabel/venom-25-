@@ -1025,6 +1025,9 @@ function AdminPanel() {
   const [telegramReady, setTelegramReady] = useState(false);
   const [error, setError] = useState('');
   const [actionKey, setActionKey] = useState('');
+  const [broadcastPhoto, setBroadcastPhoto] = useState('');
+  const [broadcastCaption, setBroadcastCaption] = useState('');
+  const [broadcastResult, setBroadcastResult] = useState('');
 
   const loadRequests = async () => {
     setError('');
@@ -1127,6 +1130,27 @@ function AdminPanel() {
     }
   };
 
+  const sendBroadcast = async () => {
+    setActionKey('broadcast');
+    setError('');
+    setBroadcastResult('');
+    try {
+      const response = await fetch(`${getApiUrl()}/api/telegram/admin/broadcast`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...telegramHeaders() },
+        body: JSON.stringify({ photo: broadcastPhoto, caption: broadcastCaption }),
+      });
+      const data = await response.json() as { targeted?: number; sent?: number; failed?: number; error?: string };
+      if (!response.ok) throw new Error(data.error ?? 'Broadcast መላክ አልተቻለም።');
+      setBroadcastResult(`${data.sent ?? 0} ተጠቃሚዎች ደርሷቸዋል፣ ${data.failed ?? 0} አልደረሳቸውም።`);
+      setBroadcastCaption('');
+    } catch (broadcastError) {
+      setError(broadcastError instanceof Error ? broadcastError.message : 'Broadcast መላክ አልተቻለም።');
+    } finally {
+      setActionKey('');
+    }
+  };
+
   const renderRequest = (request: AdminRequest, type: AdminRequestType) => {
     const actionKeyForRequest = `${type}-${request.id}`;
     return <article key={actionKeyForRequest} className="depth-card rounded-2xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] p-4">
@@ -1188,6 +1212,23 @@ function AdminPanel() {
           <p className="mt-3 text-[11px] text-[hsl(var(--muted-foreground))]">የሊደርቦርድ 1ኛ፣ 2ኛ እና 3ኛ ድርሻ በድምር 100% መሆን አለበት።</p>
           <button type="button" data-testid="button-save-game-settings" disabled={actionKey === 'settings'} onClick={() => void saveSettings()} className="depth-action mt-4 w-full rounded-xl bg-[hsl(var(--accent))] px-3 py-3 text-xs font-extrabold text-[hsl(var(--accent-foreground))] shadow-[0_4px_0_hsl(128_65%_30%)] transition-transform active:translate-y-1 active:shadow-none disabled:cursor-wait disabled:opacity-60">{actionKey === 'settings' ? 'በማስቀመጥ ላይ...' : 'ቅንብሮችን አስቀምጥ'}</button>
         </section>}
+        <section className="depth-card rounded-2xl border border-[hsl(var(--accent)/.35)] bg-[hsl(var(--accent)/.08)] p-4">
+          <div className="mb-4">
+            <p className="text-[10px] font-bold uppercase tracking-[.12em] text-[hsl(var(--accent))]">TELEGRAM BROADCAST</p>
+            <h2 className="mt-1 text-sm font-extrabold">ለሁሉም ተጠቃሚዎች መልዕክት ላክ</h2>
+            <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">የምስል URL ወይም Telegram file ID፣ ጽሁፍ እና Play Now ቁልፍ ይላካል።</p>
+          </div>
+          <label className="block text-xs font-bold">
+            <span>የምስል URL / File ID</span>
+            <input type="text" value={broadcastPhoto} onChange={(event) => setBroadcastPhoto(event.target.value)} placeholder="https://..." className="mt-1 w-full rounded-xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] px-3 py-3 text-sm text-[hsl(var(--foreground))] outline-none placeholder:text-[hsl(var(--muted-foreground))]" />
+          </label>
+          <label className="mt-3 block text-xs font-bold">
+            <span>መልዕክት</span>
+            <textarea value={broadcastCaption} onChange={(event) => setBroadcastCaption(event.target.value)} maxLength={1024} rows={4} placeholder="መልዕክትዎን እዚህ ይጻፉ..." className="mt-1 w-full resize-none rounded-xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] px-3 py-3 text-sm text-[hsl(var(--foreground))] outline-none placeholder:text-[hsl(var(--muted-foreground))]" />
+          </label>
+          {broadcastResult && <p className="mt-3 rounded-xl border border-[hsl(var(--accent)/.4)] px-3 py-2 text-xs font-bold text-[hsl(var(--accent))]">{broadcastResult}</p>}
+          <button type="button" data-testid="button-send-broadcast" disabled={actionKey === 'broadcast' || !broadcastPhoto.trim() || !broadcastCaption.trim()} onClick={() => void sendBroadcast()} className="depth-action mt-4 w-full rounded-xl bg-[hsl(var(--accent))] px-3 py-3 text-xs font-extrabold text-[hsl(var(--accent-foreground))] shadow-[0_4px_0_hsl(128_65%_30%)] transition-transform active:translate-y-1 active:shadow-none disabled:cursor-not-allowed disabled:opacity-60">{actionKey === 'broadcast' ? 'በመላክ ላይ...' : '📣 ለሁሉም ላክ'}</button>
+        </section>
         <section className="depth-card rounded-2xl border border-[hsl(var(--primary)/.35)] bg-[hsl(var(--primary)/.08)] p-4">
           <p className="text-[10px] font-bold uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))]">APP WALLET</p>
           <p data-testid="text-admin-app-wallet-balance" className="mt-1 font-mono text-3xl font-extrabold text-[hsl(var(--primary))]">{Number(requests.appWalletBalance).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB</p>
