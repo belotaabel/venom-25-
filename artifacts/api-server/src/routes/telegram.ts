@@ -1,7 +1,10 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 import {
   appWalletTransactions,
+  bingoCalls,
+  bingoPlayerCards,
+  bingoRounds,
   db,
   depositRequests,
   gameSettings,
@@ -1033,7 +1036,10 @@ router.post("/telegram/admin/promos/:id/:action", async (req, res) => {
 
 router.get("/telegram/admin/users", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  const users = await db.select({
+  const [activeRound] = await db.select({ id: bingoRounds.id, status: bingoRounds.status, startedAt: bingoRounds.startedAt, completedAt: bingoRounds.completedAt }).from(bingoRounds)
+    .where(or(eq(bingoRounds.status, "selecting"), eq(bingoRounds.status, "playing"))).orderBy(desc(bingoRounds.startedAt)).limit(1);
+  const [users, activeCalls] = await Promise.all([
+    db.select({
     telegramId: telegramUsers.telegramId,
     chatId: telegramUsers.chatId,
     firstName: telegramUsers.firstName,
@@ -1045,8 +1051,19 @@ router.get("/telegram/admin/users", async (req, res) => {
     winWalletBalance: telegramUsers.winWalletBalance,
     createdAt: telegramUsers.createdAt,
     updatedAt: telegramUsers.updatedAt,
-  }).from(telegramUsers).orderBy(desc(telegramUsers.createdAt));
-  res.json(users);
+    }).from(telegramUsers).orderBy(desc(telegramUsers.createdAt)),
+    activeRound ? db.select({ number: bingoCalls.number }).from(bingoCalls).where(eq(bingoCalls.roundId, activeRound.id)).orderBy(desc(bingoCalls.position)) : Promise.resolve([]),
+  ]);
+  const cards = activeRound ? await db.select({ telegramId: bingoPlayerCards.telegramId, cardNumber: bingoPlayerCards.cardNumber, selectedAt: bingoPlayerCards.selectedAt }).from(bingoPlayerCards).where(eq(bingoPlayerCards.roundId, activeRound.id)) : [];
+  res.json(users.map((user) => ({
+    ...user,
+    gameStatus: activeRound?.status ?? "no-active-game",
+    activeRoundId: activeRound?.id ?? null,
+    activeRoundStartedAt: activeRound?.startedAt ?? null,
+    activeRoundCards: cards.filter((card) => card.telegramId === user.telegramId).map((card) => card.cardNumber),
+    lastCardSelectedAt: cards.filter((card) => card.telegramId === user.telegramId).sort((left, right) => right.selectedAt.getTime() - left.selectedAt.getTime())[0]?.selectedAt ?? null,
+    calledBalls: activeCalls.map((call) => call.number),
+  })));
 });
 
 router.post("/telegram/admin/broadcast", async (req, res) => {
