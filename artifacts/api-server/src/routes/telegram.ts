@@ -1031,6 +1031,24 @@ router.post("/telegram/admin/promos/:id/:action", async (req, res) => {
   res.json(promo);
 });
 
+router.get("/telegram/admin/users", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const users = await db.select({
+    telegramId: telegramUsers.telegramId,
+    chatId: telegramUsers.chatId,
+    firstName: telegramUsers.firstName,
+    lastName: telegramUsers.lastName,
+    username: telegramUsers.username,
+    phoneNumber: telegramUsers.phoneNumber,
+    languageCode: telegramUsers.languageCode,
+    playWalletBalance: telegramUsers.playWalletBalance,
+    winWalletBalance: telegramUsers.winWalletBalance,
+    createdAt: telegramUsers.createdAt,
+    updatedAt: telegramUsers.updatedAt,
+  }).from(telegramUsers).orderBy(desc(telegramUsers.createdAt));
+  res.json(users);
+});
+
 router.post("/telegram/admin/broadcast", async (req, res) => {
   const admin = requireAdmin(req, res);
   if (!admin) return;

@@ -1004,6 +1004,7 @@ type AdminRequest = {
 type AdminRequestType = 'deposit' | 'withdrawal';
 type AdminAction = 'approve' | 'reject';
 type AdminPromo = { id: number; code: string; rewardAmount: string; maxRedemptions: number | null; redemptionCount: number; isActive: boolean; expiresAt: string | null };
+type AdminUser = { telegramId: number; chatId: number; firstName: string; lastName: string | null; username: string | null; phoneNumber: string; languageCode: string | null; playWalletBalance: string; winWalletBalance: string; createdAt: string; updatedAt: string };
 type AdminGameSettings = {
   registrationBonus: string;
   inviteBonus: string;
@@ -1022,6 +1023,10 @@ function AdminPanel() {
   const [, setLocation] = useLocation();
   const [requests, setRequests] = useState<{ deposits: AdminRequest[]; withdrawals: AdminRequest[]; appWalletBalance: string } | null>(null);
   const [gameSettings, setGameSettings] = useState<AdminGameSettings | null>(null);
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [selectedUser, setSelectedUser] = useState<AdminUser | null>(null);
+  const [userSearch, setUserSearch] = useState('');
+  const [adminTab, setAdminTab] = useState<'overview' | 'users'>('overview');
   const [status, setStatus] = useState<'loading' | 'ready' | 'auth-required' | 'denied' | 'error'>('loading');
   const [telegramReady, setTelegramReady] = useState(false);
   const [error, setError] = useState('');
@@ -1037,30 +1042,34 @@ function AdminPanel() {
 
   const loadRequests = async () => {
     setError('');
-    const [requestResponse, settingsResponse, promosResponse] = await Promise.all([
+    const [requestResponse, settingsResponse, promosResponse, usersResponse] = await Promise.all([
       fetch(`${getApiUrl()}/api/telegram/admin/requests`, { headers: telegramHeaders() }),
       fetch(`${getApiUrl()}/api/telegram/admin/settings`, { headers: telegramHeaders() }),
       fetch(`${getApiUrl()}/api/telegram/admin/promos`, { headers: telegramHeaders() }),
+      fetch(`${getApiUrl()}/api/telegram/admin/users`, { headers: telegramHeaders() }),
     ]);
-    if (requestResponse.status === 401 || settingsResponse.status === 401 || promosResponse.status === 401) {
+    if (requestResponse.status === 401 || settingsResponse.status === 401 || promosResponse.status === 401 || usersResponse.status === 401) {
       setStatus('auth-required');
       return;
     }
-    if (requestResponse.status === 403 || settingsResponse.status === 403 || promosResponse.status === 403) {
+    if (requestResponse.status === 403 || settingsResponse.status === 403 || promosResponse.status === 403 || usersResponse.status === 403) {
       setStatus('denied');
       return;
     }
-    const [data, settings, promoData] = await Promise.all([
+    const [data, settings, promoData, userData] = await Promise.all([
       requestResponse.json() as Promise<{ deposits?: AdminRequest[]; withdrawals?: AdminRequest[]; appWalletBalance?: string; error?: string }>,
       settingsResponse.json() as Promise<AdminGameSettings & { error?: string }>,
       promosResponse.json() as Promise<AdminPromo[] & { error?: string }>,
+      usersResponse.json() as Promise<AdminUser[] & { error?: string }>,
     ]);
     if (!requestResponse.ok) throw new Error(data.error ?? 'የአድሚን መረጃ መጫን አልተቻለም።');
     if (!settingsResponse.ok) throw new Error(settings.error ?? 'የቅንብሮች መጫን አልተቻለም።');
     if (!promosResponse.ok) throw new Error(promoData.error ?? 'Promo Code መጫን አልተቻለም።');
+    if (!usersResponse.ok) throw new Error(userData.error ?? 'Users መጫን አልተቻለም።');
     setRequests({ deposits: data.deposits ?? [], withdrawals: data.withdrawals ?? [], appWalletBalance: data.appWalletBalance ?? '0.00' });
     setGameSettings(settings);
     setPromos(promoData);
+    setUsers(userData);
     setStatus('ready');
   };
 
@@ -1241,6 +1250,11 @@ function AdminPanel() {
       {status === 'error' && <div className="depth-surface rounded-2xl border border-[hsl(var(--destructive)/.5)] p-5 text-sm text-[hsl(var(--foreground)/.85)]"><p>{error}</p><button type="button" onClick={() => void loadRequests()} className="mt-4 rounded-xl bg-[hsl(var(--primary))] px-4 py-2 text-xs font-bold text-[hsl(var(--primary-foreground))]">RETRY</button></div>}
       {status === 'ready' && requests && <div className="space-y-6">
         {error && <p className="rounded-xl border border-[hsl(var(--destructive)/.5)] p-3 text-xs text-[hsl(var(--destructive))]">{error}</p>}
+        <div className="grid grid-cols-2 gap-2 rounded-2xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] p-1">
+          <button type="button" onClick={() => setAdminTab('overview')} className={`rounded-xl px-3 py-3 text-xs font-extrabold ${adminTab === 'overview' ? 'bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]' : 'text-[hsl(var(--muted-foreground))]'}`}>OVERVIEW</button>
+          <button type="button" data-testid="button-admin-users-tab" onClick={() => setAdminTab('users')} className={`rounded-xl px-3 py-3 text-xs font-extrabold ${adminTab === 'users' ? 'bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]' : 'text-[hsl(var(--muted-foreground))]'}`}>USERS ({users.length})</button>
+        </div>
+        <div className={adminTab === 'users' ? 'hidden' : 'space-y-6'}>
         {gameSettings && <section className="depth-card rounded-2xl border border-[hsl(var(--accent)/.35)] bg-[hsl(var(--accent)/.08)] p-4">
           <div className="mb-4">
             <p className="text-[10px] font-bold uppercase tracking-[.12em] text-[hsl(var(--accent))]">GAME SETTINGS</p>
@@ -1303,6 +1317,16 @@ function AdminPanel() {
           <div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-extrabold tracking-[.08em]">💸 WITHDRAWALS</h2><span className="rounded-full bg-[hsl(var(--primary)/.15)] px-2 py-1 text-xs font-bold text-[hsl(var(--primary))]">{requests.withdrawals.length}</span></div>
           <div className="space-y-3">{requests.withdrawals.length ? requests.withdrawals.map((request) => renderRequest(request, 'withdrawal')) : <p className="depth-surface rounded-2xl p-4 text-xs text-[hsl(var(--muted-foreground))]">ምንም የሚጠባበቅ ዊዝድሮ የለም።</p>}</div>
         </section>
+        </div>
+        {adminTab === 'users' && <section className="space-y-4">
+          <input value={userSearch} onChange={(event) => setUserSearch(event.target.value)} placeholder="Search name, username, phone, Telegram ID..." className="w-full rounded-xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] px-3 py-3 text-sm text-[hsl(var(--foreground))] outline-none placeholder:text-[hsl(var(--muted-foreground))]" />
+          {selectedUser && <article className="depth-card rounded-2xl border border-[hsl(var(--primary)/.45)] bg-[hsl(var(--primary)/.08)] p-4">
+            <div className="mb-4 flex items-start justify-between gap-3"><div><p className="text-[10px] font-bold uppercase tracking-[.12em] text-[hsl(var(--primary))]">USER DETAILS</p><h2 className="mt-1 text-xl font-extrabold">{selectedUser.firstName} {selectedUser.lastName ?? ''}</h2></div><button type="button" onClick={() => setSelectedUser(null)} className="rounded-lg px-2 py-1 text-xs font-bold text-[hsl(var(--muted-foreground))]">CLOSE</button></div>
+            <div className="grid grid-cols-2 gap-3 text-xs"><div><p className="text-[hsl(var(--muted-foreground))]">Telegram ID</p><p className="mt-1 font-mono font-bold">{selectedUser.telegramId}</p></div><div><p className="text-[hsl(var(--muted-foreground))]">Chat ID</p><p className="mt-1 font-mono font-bold">{selectedUser.chatId}</p></div><div><p className="text-[hsl(var(--muted-foreground))]">Username</p><p className="mt-1 font-bold">{selectedUser.username ? `@${selectedUser.username}` : '—'}</p></div><div><p className="text-[hsl(var(--muted-foreground))]">Phone</p><p className="mt-1 font-mono font-bold">{selectedUser.phoneNumber}</p></div><div><p className="text-[hsl(var(--muted-foreground))]">Play Wallet</p><p className="mt-1 font-mono text-lg font-extrabold text-[hsl(var(--accent))]">{selectedUser.playWalletBalance} ETB</p></div><div><p className="text-[hsl(var(--muted-foreground))]">Win Wallet</p><p className="mt-1 font-mono text-lg font-extrabold text-[hsl(var(--primary))]">{selectedUser.winWalletBalance} ETB</p></div><div><p className="text-[hsl(var(--muted-foreground))]">Language</p><p className="mt-1 font-bold">{selectedUser.languageCode ?? '—'}</p></div><div><p className="text-[hsl(var(--muted-foreground))]">Registered</p><p className="mt-1 font-bold">{new Date(selectedUser.createdAt).toLocaleString()}</p></div></div>
+            <p className="mt-3 text-[11px] text-[hsl(var(--muted-foreground))]">Last updated: {new Date(selectedUser.updatedAt).toLocaleString()}</p>
+          </article>}
+          <div className="space-y-2">{users.filter((user) => `${user.firstName} ${user.lastName ?? ''} ${user.username ?? ''} ${user.phoneNumber} ${user.telegramId}`.toLowerCase().includes(userSearch.toLowerCase())).map((user) => <button type="button" key={user.telegramId} onClick={() => setSelectedUser(user)} className="flex w-full items-center justify-between gap-3 rounded-2xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] p-4 text-left transition-colors hover:border-[hsl(var(--primary)/.5)]"><span className="min-w-0"><span className="block truncate text-sm font-extrabold">{user.firstName} {user.lastName ?? ''}</span><span className="mt-1 block truncate text-xs text-[hsl(var(--muted-foreground))]">{user.username ? `@${user.username}` : user.phoneNumber}</span></span><span className="shrink-0 text-right"><span className="block font-mono text-sm font-bold text-[hsl(var(--accent))]">{user.playWalletBalance} ETB</span><span className="block text-[10px] text-[hsl(var(--muted-foreground))]">View details →</span></span></button>)}{users.length === 0 && <p className="rounded-2xl p-4 text-xs text-[hsl(var(--muted-foreground))]">ምንም user አልተገኘም።</p>}</div>
+        </section>}
       </div>}
     </div>
   </main>;
