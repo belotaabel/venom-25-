@@ -23,6 +23,15 @@ const router: IRouter = Router();
 const TELEGRAM_API_BASE = "https://api.telegram.org/bot";
 const AUTH_DATA_MAX_AGE_SECONDS = 86_400;
 
+type RequiredChannel = { username: string; title: string; url: string };
+
+function getRequiredChannels(): RequiredChannel[] {
+  return (process.env["TELEGRAM_REQUIRED_CHANNELS"] ?? "").split(",").map((entry) => entry.trim()).filter(Boolean).map((entry) => {
+    const [username, title = username, url = `https://t.me/${username.replace(/^@/, "")}`] = entry.split("|").map((value) => value.trim());
+    return { username: username.startsWith("@") ? username : `@${username}`, title, url };
+  });
+}
+
 type TelegramUser = {
   id: number;
   first_name: string;
@@ -70,6 +79,7 @@ type WithdrawalSession =
 const depositSessions = new Map<number, DepositSession>();
 const withdrawalSessions = new Map<number, WithdrawalSession>();
 const promoSessions = new Set<number>();
+const pendingChannelRegistrations = new Map<number, NonNullable<TelegramUpdate["message"]>>();
 const SUPPORT_USERNAME = "@******bingosupport";
 const TELEBIRR_ACCOUNT_NUMBER = "0964846006";
 
@@ -223,6 +233,34 @@ function getPaymentMethodKeyboard() {
   return {
     inline_keyboard: [[{ text: "ቴሌብር", callback_data: "deposit:telebirr" }]],
   };
+}
+
+async function getMissingRequiredChannels(telegramId: number) {
+  const channels = getRequiredChannels();
+  const missing: RequiredChannel[] = [];
+  for (const channel of channels) {
+    try {
+      const member = await telegramRequest<{ status?: string }>("getChatMember", { chat_id: channel.username, user_id: telegramId });
+      if (!member.status || ["creator", "administrator", "member"].includes(member.status) === false) missing.push(channel);
+    } catch (error) {
+      logger.warn({ err: error, channel: channel.username, telegramId }, "Required channel membership check failed");
+      missing.push(channel);
+    }
+  }
+  return missing;
+}
+
+async function sendRequiredChannelPrompt(chatId: number, missing: RequiredChannel[]) {
+  await telegramRequest("sendMessage", {
+    chat_id: chatId,
+    text: "ምዝገባውን ለመጨረስ እባክዎ የሚከተሉትን ቻናሎች ይቀላቀሉ። ከተቀላቀሉ በኋላ Verify ይጫኑ።",
+    reply_markup: {
+      inline_keyboard: [
+        ...missing.map((channel) => [{ text: `Join ${channel.title}`, url: channel.url }]),
+        [{ text: "✅ Verify Membership", callback_data: "required-channel:verify" }],
+      ],
+    },
+  });
 }
 
 async function sendWelcomeMessage(chatId: number, firstName?: string) {
@@ -537,6 +575,14 @@ async function saveTelegramContact(message: NonNullable<TelegramUpdate["message"
     return;
   }
 
+  const existingUser = await db.query.telegramUsers.findFirst({ where: eq(telegramUsers.telegramId, user.id), columns: { telegramId: true } });
+  const missingChannels = existingUser ? [] : await getMissingRequiredChannels(user.id);
+  if (missingChannels.length) {
+    pendingChannelRegistrations.set(user.id, message);
+    await sendRequiredChannelPrompt(message.chat.id, missingChannels);
+    return;
+  }
+
   const registration = {
     telegramId: user.id,
     chatId: message.chat.id,
@@ -630,6 +676,24 @@ async function handleTelegramUpdate(update: TelegramUpdate) {
     const decision = callbackQuery.data?.match(/^(deposit|withdrawal):(approve|reject):(\d+)$/);
     if (decision && (!adminChatId || callbackChatId !== adminChatId)) {
       await telegramRequest("answerCallbackQuery", { callback_query_id: callbackQuery.id, text: "Unauthorized.", show_alert: true });
+      return;
+    }
+    if (callbackQuery.data === "required-channel:verify" && callbackQuery.message) {
+      const telegramId = callbackQuery.from?.id;
+      const pending = telegramId ? pendingChannelRegistrations.get(telegramId) : undefined;
+      if (!telegramId || !pending) {
+        await telegramRequest("answerCallbackQuery", { callback_query_id: callbackQuery.id, text: "የሚጠባበቅ ምዝገባ የለም።", show_alert: true });
+        return;
+      }
+      const missing = await getMissingRequiredChannels(telegramId);
+      if (missing.length) {
+        await telegramRequest("answerCallbackQuery", { callback_query_id: callbackQuery.id, text: "እባክዎ ሁሉንም ቻናሎች ይቀላቀሉ።", show_alert: true });
+        await sendRequiredChannelPrompt(callbackQuery.message.chat.id, missing);
+        return;
+      }
+      pendingChannelRegistrations.delete(telegramId);
+      await telegramRequest("answerCallbackQuery", { callback_query_id: callbackQuery.id, text: "Membership verified." });
+      await saveTelegramContact(pending);
       return;
     }
     await telegramRequest("answerCallbackQuery", { callback_query_id: callbackQuery.id });
