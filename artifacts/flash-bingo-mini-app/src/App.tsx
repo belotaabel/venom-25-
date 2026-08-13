@@ -1025,7 +1025,7 @@ function AdminPanel() {
   const [telegramReady, setTelegramReady] = useState(false);
   const [error, setError] = useState('');
   const [actionKey, setActionKey] = useState('');
-  const [broadcastPhoto, setBroadcastPhoto] = useState('');
+  const [broadcastPhoto, setBroadcastPhoto] = useState<File | null>(null);
   const [broadcastCaption, setBroadcastCaption] = useState('');
   const [broadcastResult, setBroadcastResult] = useState('');
 
@@ -1131,18 +1131,26 @@ function AdminPanel() {
   };
 
   const sendBroadcast = async () => {
+    if (!broadcastPhoto) return;
     setActionKey('broadcast');
     setError('');
     setBroadcastResult('');
     try {
+      const photo = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('የምስሉን ፋይል ማንበብ አልተቻለም።'));
+        reader.readAsDataURL(broadcastPhoto);
+      });
       const response = await fetch(`${getApiUrl()}/api/telegram/admin/broadcast`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...telegramHeaders() },
-        body: JSON.stringify({ photo: broadcastPhoto, caption: broadcastCaption }),
+        body: JSON.stringify({ photo, caption: broadcastCaption }),
       });
       const data = await response.json() as { targeted?: number; sent?: number; failed?: number; error?: string };
       if (!response.ok) throw new Error(data.error ?? 'Broadcast መላክ አልተቻለም።');
       setBroadcastResult(`${data.sent ?? 0} ተጠቃሚዎች ደርሷቸዋል፣ ${data.failed ?? 0} አልደረሳቸውም።`);
+      setBroadcastPhoto(null);
       setBroadcastCaption('');
     } catch (broadcastError) {
       setError(broadcastError instanceof Error ? broadcastError.message : 'Broadcast መላክ አልተቻለም።');
@@ -1216,18 +1224,19 @@ function AdminPanel() {
           <div className="mb-4">
             <p className="text-[10px] font-bold uppercase tracking-[.12em] text-[hsl(var(--accent))]">TELEGRAM BROADCAST</p>
             <h2 className="mt-1 text-sm font-extrabold">ለሁሉም ተጠቃሚዎች መልዕክት ላክ</h2>
-            <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">የምስል URL ወይም Telegram file ID፣ ጽሁፍ እና Play Now ቁልፍ ይላካል።</p>
+            <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">ምስል፣ ጽሁፍ እና Play Now ቁልፍ ለሁሉም ይላካል።</p>
           </div>
           <label className="block text-xs font-bold">
-            <span>የምስል URL / File ID</span>
-            <input type="text" value={broadcastPhoto} onChange={(event) => setBroadcastPhoto(event.target.value)} placeholder="https://..." className="mt-1 w-full rounded-xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] px-3 py-3 text-sm text-[hsl(var(--foreground))] outline-none placeholder:text-[hsl(var(--muted-foreground))]" />
+            <span>ምስል አፕሎድ</span>
+            <input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => setBroadcastPhoto(event.target.files?.[0] ?? null)} className="mt-1 w-full rounded-xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] px-3 py-3 text-sm text-[hsl(var(--foreground))] file:mr-3 file:rounded-lg file:border-0 file:bg-[hsl(var(--primary))] file:px-3 file:py-2 file:font-bold file:text-[hsl(var(--primary-foreground))]" />
+            <span className="mt-1 block text-[11px] font-normal text-[hsl(var(--muted-foreground))]">JPEG, PNG ወይም WebP፣ እስከ 5 MB</span>
           </label>
           <label className="mt-3 block text-xs font-bold">
             <span>መልዕክት</span>
             <textarea value={broadcastCaption} onChange={(event) => setBroadcastCaption(event.target.value)} maxLength={1024} rows={4} placeholder="መልዕክትዎን እዚህ ይጻፉ..." className="mt-1 w-full resize-none rounded-xl border border-[hsl(136_58%_25%)] bg-[hsl(156_48%_10%)] px-3 py-3 text-sm text-[hsl(var(--foreground))] outline-none placeholder:text-[hsl(var(--muted-foreground))]" />
           </label>
           {broadcastResult && <p className="mt-3 rounded-xl border border-[hsl(var(--accent)/.4)] px-3 py-2 text-xs font-bold text-[hsl(var(--accent))]">{broadcastResult}</p>}
-          <button type="button" data-testid="button-send-broadcast" disabled={actionKey === 'broadcast' || !broadcastPhoto.trim() || !broadcastCaption.trim()} onClick={() => void sendBroadcast()} className="depth-action mt-4 w-full rounded-xl bg-[hsl(var(--accent))] px-3 py-3 text-xs font-extrabold text-[hsl(var(--accent-foreground))] shadow-[0_4px_0_hsl(128_65%_30%)] transition-transform active:translate-y-1 active:shadow-none disabled:cursor-not-allowed disabled:opacity-60">{actionKey === 'broadcast' ? 'በመላክ ላይ...' : '📣 ለሁሉም ላክ'}</button>
+          <button type="button" data-testid="button-send-broadcast" disabled={actionKey === 'broadcast' || !broadcastPhoto || broadcastPhoto.size > 5 * 1024 * 1024 || !broadcastCaption.trim()} onClick={() => void sendBroadcast()} className="depth-action mt-4 w-full rounded-xl bg-[hsl(var(--accent))] px-3 py-3 text-xs font-extrabold text-[hsl(var(--accent-foreground))] shadow-[0_4px_0_hsl(128_65%_30%)] transition-transform active:translate-y-1 active:shadow-none disabled:cursor-not-allowed disabled:opacity-60">{actionKey === 'broadcast' ? 'በመላክ ላይ...' : '📣 ለሁሉም ላክ'}</button>
         </section>
         <section className="depth-card rounded-2xl border border-[hsl(var(--primary)/.35)] bg-[hsl(var(--primary)/.08)] p-4">
           <p className="text-[10px] font-bold uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))]">APP WALLET</p>

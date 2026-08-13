@@ -127,6 +127,22 @@ export async function telegramRequest<T>(method: string, body: Record<string, un
   return result.result as T;
 }
 
+async function telegramPhotoRequest<T>(photo: string, body: Record<string, unknown>): Promise<T> {
+  const token = getBotToken();
+  if (!token) throw new Error("TELEGRAM_BOT_TOKEN is not configured");
+  const match = photo.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/);
+  if (!match) throw new Error("Invalid uploaded image");
+  const form = new FormData();
+  form.append("photo", new Blob([Buffer.from(match[2], "base64")], { type: match[1] }), "broadcast-image");
+  Object.entries(body).forEach(([key, value]) => form.append(key, typeof value === "string" ? value : JSON.stringify(value)));
+  const response = await fetch(`${TELEGRAM_API_BASE}${token}/sendPhoto`, { method: "POST", body: form });
+  const result = (await response.json()) as { ok: boolean; result?: T; description?: string };
+  if (!response.ok || !result.ok) {
+    throw new Error(`Telegram sendPhoto failed: ${result.description ?? response.statusText}`);
+  }
+  return result.result as T;
+}
+
 function isTelegramWebhookRequest(req: Request) {
   const expectedSecret = getWebhookSecret();
   return Boolean(expectedSecret) && req.header("x-telegram-bot-api-secret-token") === expectedSecret;
@@ -892,8 +908,8 @@ router.post("/telegram/admin/broadcast", async (req, res) => {
   const photo = typeof body.photo === "string" ? body.photo.trim() : "";
   const caption = typeof body.caption === "string" ? body.caption.trim() : "";
   const webAppUrl = getWebAppUrl();
-  if (!photo || photo.length > 2_000 || !caption || caption.length > 1_024 || !webAppUrl) {
-    res.status(400).json({ error: "Enter an image URL or Telegram file ID, message text, and configure the web app URL." });
+  if (!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(photo) || photo.length > 7_000_000 || !caption || caption.length > 1_024 || !webAppUrl) {
+    res.status(400).json({ error: "Upload a JPEG, PNG, or WebP image up to 5 MB, enter message text, and configure the web app URL." });
     return;
   }
 
@@ -903,13 +919,12 @@ router.post("/telegram/admin/broadcast", async (req, res) => {
   let failed = 0;
   for (const chatId of chatIds) {
     try {
-      await telegramRequest("sendPhoto", {
-        chat_id: chatId,
-        photo,
+      await telegramPhotoRequest(photo, {
+        chat_id: String(chatId),
         caption,
-        reply_markup: {
+        reply_markup: JSON.stringify({
           inline_keyboard: [[{ text: "Play Now", web_app: { url: webAppUrl } }]],
-        },
+        }),
       });
       sent += 1;
     } catch (error) {
