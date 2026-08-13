@@ -206,7 +206,7 @@ function getPaymentMethodKeyboard() {
 async function sendWelcomeMessage(chatId: number, firstName?: string) {
   await telegramRequest("sendMessage", {
     chat_id: chatId,
-    text: `🎉 እንኳን ወደ Flash Bingo በደህና መጡ${firstName ? ` ${firstName}` : ""}! 🎰\n\nለመመዝገብ "📝 Register" የሚለውን ይጫኑ።\n\nከታች ያለውን ምናሌ በመጠቀም ጨዋታውን ይጀምሩ።`,
+    text: `🎉 እንኳን ወደ Venom Bingo በደህና መጡ${firstName ? ` ${firstName}` : ""}! 🎰\n\nለመመዝገብ "📝 Register" የሚለውን ይጫኑ።\n\nከታች ያለውን ምናሌ በመጠቀም ጨዋታውን ይጀምሩ።`,
     reply_markup: getMainKeyboard(chatId),
   });
 }
@@ -385,9 +385,9 @@ async function sendMiniAppLink(chatId: number) {
   }
   await telegramRequest("sendMessage", {
     chat_id: chatId,
-    text: "Flash Bingo ለመክፈት ከታች ያለውን ቁልፍ ይጫኑ።",
+    text: "Venom Bingo ለመክፈት ከታች ያለውን ቁልፍ ይጫኑ።",
     reply_markup: {
-      inline_keyboard: [[{ text: "Flash Bingo ክፈት", web_app: { url: webAppUrl } }]],
+      inline_keyboard: [[{ text: "Venom Bingo ክፈት", web_app: { url: webAppUrl } }]],
     },
   });
 }
@@ -590,8 +590,8 @@ async function saveTelegramContact(message: NonNullable<TelegramUpdate["message"
   }
 
   const text = isNewRegistration
-    ? `✅ እንኳን ደስ አለዎት ${registration.firstName}! ምዝገባዎ ተሳክቷል።\n\n🤑 የ${settings.registrationBonus} ብር የPlay Wallet ገቢ ተደርጎልዎታል።\n\nአሁን Flash Bingoን መጫወት ይችላሉ።`
-    : "እርስዎ ቀድሞውኑ የFlash Bingo ተጠቃሚ ነዎት።\n\nበቀጥታ ወደ ጨዋታ መቀላቀል ይችላሉ።";
+    ? `✅ እንኳን ደስ አለዎት ${registration.firstName}! ምዝገባዎ ተሳክቷል።\n\n🤑 የ${settings.registrationBonus} ብር የPlay Wallet ገቢ ተደርጎልዎታል።\n\nአሁን Venom Bingoን መጫወት ይችላሉ።`
+    : "እርስዎ ቀድሞውኑ የVenom Bingo ተጠቃሚ ነዎት።\n\nበቀጥታ ወደ ጨዋታ መቀላቀል ይችላሉ።";
 
   await telegramRequest("sendMessage", {
     chat_id: message.chat.id,
@@ -1010,7 +1010,7 @@ export async function registerTelegramWebhook() {
       ? [{
           method: "setChatMenuButton",
           body: {
-            menu_button: { type: "web_app", text: "Flash Bingo", web_app: { url: webAppUrl } },
+            menu_button: { type: "web_app", text: "Venom Bingo", web_app: { url: webAppUrl } },
           },
         }]
       : []),
@@ -1018,7 +1018,7 @@ export async function registerTelegramWebhook() {
       method: "setMyCommands",
       body: {
         commands: [
-          { command: "start", description: "Flash Bingo ክፈት" },
+          { command: "start", description: "Venom Bingo ክፈት" },
           { command: "register", description: "Register" },
           { command: "play", description: "Play Bingo" },
           { command: "deposit", description: "Deposit" },
