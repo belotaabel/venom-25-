@@ -829,14 +829,22 @@ async function handleTelegramUpdate(update: TelegramUpdate) {
     return;
   }
   if (session?.step === "transaction-id") {
-    if (text.length > 100) {
+    const sms = parseTelebirrDepositSms(text);
+    if (sms && Number(sms.amount) !== session.amount) {
       await telegramRequest("sendMessage", {
         chat_id: message.chat.id,
-        text: "እባክዎ ትክክለኛ የTransaction ID ያስገቡ።",
+        text: `የSMS መጠን ${sms.amount} ETB ነው፣ እርስዎ የጠየቁት መጠን ${session.amount.toFixed(2)} ETB ነው። እባክዎ ትክክለኛውን SMS ይላኩ።`,
       });
       return;
     }
-    await submitDepositRequest(message.chat.id, message.from, session.amount, text);
+    if (!sms && text.length > 100) {
+      await telegramRequest("sendMessage", {
+        chat_id: message.chat.id,
+        text: "እባክዎ ሙሉ የTelebirr SMS ወይም ትክክለኛ የTransaction ID ያስገቡ።",
+      });
+      return;
+    }
+    await submitDepositRequest(message.chat.id, message.from, session.amount, sms?.transactionId ?? text);
     return;
   }
 
