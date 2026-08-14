@@ -1,10 +1,15 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 import {
   appWalletTransactions,
+  bingoCalls,
+  bingoPlayerCards,
+  bingoRounds,
   db,
   depositRequests,
   gameSettings,
+  promoCodes,
+  promoRedemptions,
   telegramReferrals,
   telegramUsers,
   walletTransactions,
@@ -17,6 +22,15 @@ import { logger } from "../lib/logger";
 const router: IRouter = Router();
 const TELEGRAM_API_BASE = "https://api.telegram.org/bot";
 const AUTH_DATA_MAX_AGE_SECONDS = 86_400;
+
+type RequiredChannel = { username: string; title: string; url: string };
+
+function getRequiredChannels(): RequiredChannel[] {
+  return (process.env["TELEGRAM_REQUIRED_CHANNELS"] ?? "").split(",").map((entry) => entry.trim()).filter(Boolean).map((entry) => {
+    const [username, title = username, url = `https://t.me/${username.replace(/^@/, "")}`] = entry.split("|").map((value) => value.trim());
+    return { username: username.startsWith("@") ? username : `@${username}`, title, url };
+  });
+}
 
 type TelegramUser = {
   id: number;
@@ -64,6 +78,8 @@ type WithdrawalSession =
 
 const depositSessions = new Map<number, DepositSession>();
 const withdrawalSessions = new Map<number, WithdrawalSession>();
+const promoSessions = new Set<number>();
+const pendingChannelRegistrations = new Map<number, NonNullable<TelegramUpdate["message"]>>();
 const SUPPORT_USERNAME = "@******bingosupport";
 const TELEBIRR_ACCOUNT_NUMBER = "0964846006";
 
@@ -123,6 +139,22 @@ export async function telegramRequest<T>(method: string, body: Record<string, un
   const result = (await response.json()) as { ok: boolean; result?: T; description?: string };
   if (!response.ok || !result.ok) {
     throw new Error(`Telegram ${method} failed: ${result.description ?? response.statusText}`);
+  }
+  return result.result as T;
+}
+
+async function telegramPhotoRequest<T>(photo: string, body: Record<string, unknown>): Promise<T> {
+  const token = getBotToken();
+  if (!token) throw new Error("TELEGRAM_BOT_TOKEN is not configured");
+  const match = photo.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/);
+  if (!match) throw new Error("Invalid uploaded image");
+  const form = new FormData();
+  form.append("photo", new Blob([Buffer.from(match[2], "base64")], { type: match[1] }), "broadcast-image");
+  Object.entries(body).forEach(([key, value]) => form.append(key, typeof value === "string" ? value : JSON.stringify(value)));
+  const response = await fetch(`${TELEGRAM_API_BASE}${token}/sendPhoto`, { method: "POST", body: form });
+  const result = (await response.json()) as { ok: boolean; result?: T; description?: string };
+  if (!response.ok || !result.ok) {
+    throw new Error(`Telegram sendPhoto failed: ${result.description ?? response.statusText}`);
   }
   return result.result as T;
 }
@@ -203,10 +235,38 @@ function getPaymentMethodKeyboard() {
   };
 }
 
+async function getMissingRequiredChannels(telegramId: number) {
+  const channels = getRequiredChannels();
+  const missing: RequiredChannel[] = [];
+  for (const channel of channels) {
+    try {
+      const member = await telegramRequest<{ status?: string }>("getChatMember", { chat_id: channel.username, user_id: telegramId });
+      if (!member.status || ["creator", "administrator", "member"].includes(member.status) === false) missing.push(channel);
+    } catch (error) {
+      logger.warn({ err: error, channel: channel.username, telegramId }, "Required channel membership check failed");
+      missing.push(channel);
+    }
+  }
+  return missing;
+}
+
+async function sendRequiredChannelPrompt(chatId: number, missing: RequiredChannel[]) {
+  await telegramRequest("sendMessage", {
+    chat_id: chatId,
+    text: "ምዝገባውን ለመጨረስ እባክዎ የሚከተሉትን ቻናሎች ይቀላቀሉ። ከተቀላቀሉ በኋላ Verify ይጫኑ።",
+    reply_markup: {
+      inline_keyboard: [
+        ...missing.map((channel) => [{ text: `Join ${channel.title}`, url: channel.url }]),
+        [{ text: "✅ Verify Membership", callback_data: "required-channel:verify" }],
+      ],
+    },
+  });
+}
+
 async function sendWelcomeMessage(chatId: number, firstName?: string) {
   await telegramRequest("sendMessage", {
     chat_id: chatId,
-    text: `🎉 እንኳን ወደ Flash Bingo በደህና መጡ${firstName ? ` ${firstName}` : ""}! 🎰\n\nለመመዝገብ "📝 Register" የሚለውን ይጫኑ።\n\nከታች ያለውን ምናሌ በመጠቀም ጨዋታውን ይጀምሩ።`,
+    text: `🎉 እንኳን ወደ Venom Bingo በደህና መጡ${firstName ? ` ${firstName}` : ""}! 🎰\n\nለመመዝገብ "📝 Register" የሚለውን ይጫኑ።\n\nከታች ያለውን ምናሌ በመጠቀም ጨዋታውን ይጀምሩ።`,
     reply_markup: getMainKeyboard(chatId),
   });
 }
@@ -385,9 +445,9 @@ async function sendMiniAppLink(chatId: number) {
   }
   await telegramRequest("sendMessage", {
     chat_id: chatId,
-    text: "Flash Bingo ለመክፈት ከታች ያለውን ቁልፍ ይጫኑ።",
+    text: "Venom Bingo ለመክፈት ከታች ያለውን ቁልፍ ይጫኑ።",
     reply_markup: {
-      inline_keyboard: [[{ text: "Flash Bingo ክፈት", web_app: { url: webAppUrl } }]],
+      inline_keyboard: [[{ text: "Venom Bingo ክፈት", web_app: { url: webAppUrl } }]],
     },
   });
 }
@@ -515,6 +575,14 @@ async function saveTelegramContact(message: NonNullable<TelegramUpdate["message"
     return;
   }
 
+  const existingUser = await db.query.telegramUsers.findFirst({ where: eq(telegramUsers.telegramId, user.id), columns: { telegramId: true } });
+  const missingChannels = existingUser ? [] : await getMissingRequiredChannels(user.id);
+  if (missingChannels.length) {
+    pendingChannelRegistrations.set(user.id, message);
+    await sendRequiredChannelPrompt(message.chat.id, missingChannels);
+    return;
+  }
+
   const registration = {
     telegramId: user.id,
     chatId: message.chat.id,
@@ -590,8 +658,8 @@ async function saveTelegramContact(message: NonNullable<TelegramUpdate["message"
   }
 
   const text = isNewRegistration
-    ? `✅ እንኳን ደስ አለዎት ${registration.firstName}! ምዝገባዎ ተሳክቷል።\n\n🤑 የ${settings.registrationBonus} ብር የPlay Wallet ገቢ ተደርጎልዎታል።\n\nአሁን Flash Bingoን መጫወት ይችላሉ።`
-    : "እርስዎ ቀድሞውኑ የFlash Bingo ተጠቃሚ ነዎት።\n\nበቀጥታ ወደ ጨዋታ መቀላቀል ይችላሉ።";
+    ? `✅ እንኳን ደስ አለዎት ${registration.firstName}! ምዝገባዎ ተሳክቷል።\n\n🤑 የ${settings.registrationBonus} ብር የPlay Wallet ገቢ ተደርጎልዎታል።\n\nአሁን Venom Bingoን መጫወት ይችላሉ።`
+    : "እርስዎ ቀድሞውኑ የVenom Bingo ተጠቃሚ ነዎት።\n\nበቀጥታ ወደ ጨዋታ መቀላቀል ይችላሉ።";
 
   await telegramRequest("sendMessage", {
     chat_id: message.chat.id,
@@ -608,6 +676,24 @@ async function handleTelegramUpdate(update: TelegramUpdate) {
     const decision = callbackQuery.data?.match(/^(deposit|withdrawal):(approve|reject):(\d+)$/);
     if (decision && (!adminChatId || callbackChatId !== adminChatId)) {
       await telegramRequest("answerCallbackQuery", { callback_query_id: callbackQuery.id, text: "Unauthorized.", show_alert: true });
+      return;
+    }
+    if (callbackQuery.data === "required-channel:verify" && callbackQuery.message) {
+      const telegramId = callbackQuery.from?.id;
+      const pending = telegramId ? pendingChannelRegistrations.get(telegramId) : undefined;
+      if (!telegramId || !pending) {
+        await telegramRequest("answerCallbackQuery", { callback_query_id: callbackQuery.id, text: "የሚጠባበቅ ምዝገባ የለም።", show_alert: true });
+        return;
+      }
+      const missing = await getMissingRequiredChannels(telegramId);
+      if (missing.length) {
+        await telegramRequest("answerCallbackQuery", { callback_query_id: callbackQuery.id, text: "እባክዎ ሁሉንም ቻናሎች ይቀላቀሉ።", show_alert: true });
+        await sendRequiredChannelPrompt(callbackQuery.message.chat.id, missing);
+        return;
+      }
+      pendingChannelRegistrations.delete(telegramId);
+      await telegramRequest("answerCallbackQuery", { callback_query_id: callbackQuery.id, text: "Membership verified." });
+      await saveTelegramContact(pending);
       return;
     }
     await telegramRequest("answerCallbackQuery", { callback_query_id: callbackQuery.id });
@@ -743,14 +829,22 @@ async function handleTelegramUpdate(update: TelegramUpdate) {
     return;
   }
   if (session?.step === "transaction-id") {
-    if (text.length > 100) {
+    const sms = parseTelebirrDepositSms(text);
+    if (sms && Number(sms.amount) !== session.amount) {
       await telegramRequest("sendMessage", {
         chat_id: message.chat.id,
-        text: "እባክዎ ትክክለኛ የTransaction ID ያስገቡ።",
+        text: `የSMS መጠን ${sms.amount} ETB ነው፣ እርስዎ የጠየቁት መጠን ${session.amount.toFixed(2)} ETB ነው። እባክዎ ትክክለኛውን SMS ይላኩ።`,
       });
       return;
     }
-    await submitDepositRequest(message.chat.id, message.from, session.amount, text);
+    if (!sms && text.length > 100) {
+      await telegramRequest("sendMessage", {
+        chat_id: message.chat.id,
+        text: "እባክዎ ሙሉ የTelebirr SMS ወይም ትክክለኛ የTransaction ID ያስገቡ።",
+      });
+      return;
+    }
+    await submitDepositRequest(message.chat.id, message.from, session.amount, sms?.transactionId ?? text);
     return;
   }
 
@@ -759,12 +853,25 @@ async function handleTelegramUpdate(update: TelegramUpdate) {
     return;
   }
 
-  if (text === "🎁 Promo Code") {
+  if (text === "🎁 Promo Code" || text === "/promo") {
+    promoSessions.add(message.chat.id);
     await telegramRequest("sendMessage", {
       chat_id: message.chat.id,
-      text: "ይህ አማራጭ በቅርቡ ይገኛል።",
+      text: "እባክዎ Promo Code ያስገቡ።",
+      reply_markup: { force_reply: true },
+    });
+    return;
+  }
+
+  if (promoSessions.has(message.chat.id)) {
+    promoSessions.delete(message.chat.id);
+    const result = await redeemPromoCode(message.from?.id ?? 0, text);
+    await telegramRequest("sendMessage", {
+      chat_id: message.chat.id,
+      text: result.ok ? `🎉 እንኳን ደስ አለዎት! ${result.amount} ብር ወደ Play Wallet ተጨምሯል።` : promoFailureMessage(result.reason),
       reply_markup: getMainKeyboard(message.chat.id),
     });
+    return;
   }
 }
 
@@ -847,6 +954,60 @@ router.post("/telegram/auth", async (req, res) => {
   res.json({ user, profile, isAdmin: user.id === getAdminUserId() });
 });
 
+type PromoRedeemResult =
+  | { ok: true; amount: string }
+  | { ok: false; reason: "invalid" | "inactive" | "expired" | "limit" | "already" | "unregistered" };
+
+function normalizePromoCode(value: string) {
+  return value.trim().toUpperCase();
+}
+
+async function redeemPromoCode(telegramId: number, code: string): Promise<PromoRedeemResult> {
+  const normalizedCode = normalizePromoCode(code);
+  if (!normalizedCode) return { ok: false, reason: "invalid" };
+  return db.transaction(async (tx) => {
+    const [promo] = await tx.select().from(promoCodes).where(eq(promoCodes.code, normalizedCode)).for("update").limit(1);
+    if (!promo) return { ok: false, reason: "invalid" };
+    if (!promo.isActive) return { ok: false, reason: "inactive" };
+    if (promo.expiresAt && promo.expiresAt.getTime() <= Date.now()) return { ok: false, reason: "expired" };
+    if (promo.maxRedemptions !== null && promo.redemptionCount >= promo.maxRedemptions) return { ok: false, reason: "limit" };
+    const [user] = await tx.select().from(telegramUsers).where(eq(telegramUsers.telegramId, telegramId)).for("update").limit(1);
+    if (!user) return { ok: false, reason: "unregistered" };
+    const [existing] = await tx.select({ id: promoRedemptions.id }).from(promoRedemptions)
+      .where(and(eq(promoRedemptions.promoCodeId, promo.id), eq(promoRedemptions.telegramId, telegramId))).limit(1);
+    if (existing) return { ok: false, reason: "already" };
+    const before = Number(user.playWalletBalance);
+    const amount = Number(promo.rewardAmount).toFixed(2);
+    const after = (before + Number(amount)).toFixed(2);
+    const [redemption] = await tx.insert(promoRedemptions).values({ promoCodeId: promo.id, telegramId, rewardAmount: amount }).returning({ id: promoRedemptions.id });
+    const reference = `promo:${promo.id}:user:${telegramId}`;
+    await tx.insert(walletTransactions).values({
+      telegramId,
+      type: "adjustment",
+      amount,
+      balanceBefore: before.toFixed(2),
+      balanceAfter: after,
+      status: "completed",
+      reference,
+      metadata: { source: "promo_code", promoCodeId: promo.id, redemptionId: redemption.id },
+    });
+    await tx.update(telegramUsers).set({ playWalletBalance: after, updatedAt: new Date() }).where(eq(telegramUsers.telegramId, telegramId));
+    await tx.update(promoCodes).set({ redemptionCount: promo.redemptionCount + 1, updatedAt: new Date() }).where(eq(promoCodes.id, promo.id));
+    return { ok: true, amount };
+  });
+}
+
+function promoFailureMessage(reason: Exclude<PromoRedeemResult, { ok: true }>["reason"]) {
+  return {
+    invalid: "የPromo Code ኮዱ ትክክል አይደለም።",
+    inactive: "ይህ Promo Code አሁን አክቲቭ አይደለም።",
+    expired: "ይህ Promo Code ጊዜው አልፎበታል።",
+    limit: "የዚህ Promo Code አጠቃቀም ቁጥር ሙሉ ሆኗል።",
+    already: "ይህን Promo Code ቀደም ብለው ተጠቅመዋል።",
+    unregistered: "እባክዎ መጀመሪያ ይመዝገቡ።",
+  }[reason];
+}
+
 function requireAdmin(req: Request, res: Response) {
   const user = getAuthenticatedTelegramUser(req);
   if (!user) {
@@ -884,6 +1045,132 @@ function parseEditableGameSettings(value: unknown): EditableGameSettings | undef
     ...Object.fromEntries(pointFields.map((field) => [field, parsedPoints[field].toFixed(2)])),
   } as EditableGameSettings;
 }
+
+router.post("/telegram/promo/redeem", async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: "Valid Telegram authentication is required" });
+    return;
+  }
+  const code = typeof req.body?.code === "string" ? req.body.code : "";
+  const result = await redeemPromoCode(user.id, code);
+  if (!result.ok) {
+    res.status(400).json({ error: promoFailureMessage(result.reason) });
+    return;
+  }
+  res.json({ success: true, amount: result.amount });
+});
+
+router.get("/telegram/admin/promos", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  res.json(await db.select().from(promoCodes).orderBy(desc(promoCodes.createdAt)));
+});
+
+router.post("/telegram/admin/promos", async (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const body = req.body as { code?: unknown; rewardAmount?: unknown; maxRedemptions?: unknown; expiresAt?: unknown };
+  const code = typeof body.code === "string" ? normalizePromoCode(body.code) : "";
+  const rewardAmount = typeof body.rewardAmount === "string" || typeof body.rewardAmount === "number" ? Number(body.rewardAmount) : NaN;
+  const maxRedemptions = body.maxRedemptions === "" || body.maxRedemptions === null || body.maxRedemptions === undefined ? null : Number(body.maxRedemptions);
+  const expiresAt = body.expiresAt ? new Date(String(body.expiresAt)) : null;
+  if (!/^[A-Z0-9_-]{3,64}$/.test(code) || !Number.isFinite(rewardAmount) || rewardAmount <= 0 || rewardAmount > 100_000 || (maxRedemptions !== null && (!Number.isSafeInteger(maxRedemptions) || maxRedemptions < 1)) || (expiresAt && Number.isNaN(expiresAt.getTime()))) {
+    res.status(400).json({ error: "Enter a valid code, reward amount, redemption limit, and expiration date." });
+    return;
+  }
+  try {
+    const [promo] = await db.insert(promoCodes).values({ code, rewardAmount: rewardAmount.toFixed(2), maxRedemptions, expiresAt, createdByTelegramId: admin.user.id, isActive: false }).returning();
+    res.status(201).json(promo);
+  } catch (error) {
+    if (error instanceof Error && /promo_codes_code_idx|duplicate key/i.test(error.message)) {
+      res.status(409).json({ error: "ይህ Promo Code አስቀድሞ አለ።" });
+      return;
+    }
+    throw error;
+  }
+});
+
+router.post("/telegram/admin/promos/:id/:action", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const id = Number(req.params.id);
+  const action = req.params.action;
+  if (!Number.isSafeInteger(id) || id <= 0 || (action !== "activate" && action !== "deactivate")) {
+    res.status(400).json({ error: "Invalid promo action" });
+    return;
+  }
+  const [promo] = await db.update(promoCodes).set({ isActive: action === "activate", updatedAt: new Date() }).where(eq(promoCodes.id, id)).returning();
+  if (!promo) {
+    res.status(404).json({ error: "Promo Code not found" });
+    return;
+  }
+  res.json(promo);
+});
+
+router.get("/telegram/admin/users", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const [activeRound] = await db.select({ id: bingoRounds.id, status: bingoRounds.status, startedAt: bingoRounds.startedAt, completedAt: bingoRounds.completedAt }).from(bingoRounds)
+    .where(or(eq(bingoRounds.status, "selecting"), eq(bingoRounds.status, "playing"))).orderBy(desc(bingoRounds.startedAt)).limit(1);
+  const [users, activeCalls] = await Promise.all([
+    db.select({
+    telegramId: telegramUsers.telegramId,
+    chatId: telegramUsers.chatId,
+    firstName: telegramUsers.firstName,
+    lastName: telegramUsers.lastName,
+    username: telegramUsers.username,
+    phoneNumber: telegramUsers.phoneNumber,
+    languageCode: telegramUsers.languageCode,
+    playWalletBalance: telegramUsers.playWalletBalance,
+    winWalletBalance: telegramUsers.winWalletBalance,
+    createdAt: telegramUsers.createdAt,
+    updatedAt: telegramUsers.updatedAt,
+    }).from(telegramUsers).orderBy(desc(telegramUsers.createdAt)),
+    activeRound ? db.select({ number: bingoCalls.number }).from(bingoCalls).where(eq(bingoCalls.roundId, activeRound.id)).orderBy(desc(bingoCalls.position)) : Promise.resolve([]),
+  ]);
+  const cards = activeRound ? await db.select({ telegramId: bingoPlayerCards.telegramId, cardNumber: bingoPlayerCards.cardNumber, selectedAt: bingoPlayerCards.selectedAt }).from(bingoPlayerCards).where(eq(bingoPlayerCards.roundId, activeRound.id)) : [];
+  res.json(users.map((user) => ({
+    ...user,
+    gameStatus: activeRound?.status ?? "no-active-game",
+    activeRoundId: activeRound?.id ?? null,
+    activeRoundStartedAt: activeRound?.startedAt ?? null,
+    activeRoundCards: cards.filter((card) => card.telegramId === user.telegramId).map((card) => card.cardNumber),
+    lastCardSelectedAt: cards.filter((card) => card.telegramId === user.telegramId).sort((left, right) => right.selectedAt.getTime() - left.selectedAt.getTime())[0]?.selectedAt ?? null,
+    calledBalls: activeCalls.map((call) => call.number),
+  })));
+});
+
+router.post("/telegram/admin/broadcast", async (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const body = req.body as { photo?: unknown; caption?: unknown };
+  const photo = typeof body.photo === "string" ? body.photo.trim() : "";
+  const caption = typeof body.caption === "string" ? body.caption.trim() : "";
+  const webAppUrl = getWebAppUrl();
+  if (!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(photo) || photo.length > 7_000_000 || !caption || caption.length > 1_024 || !webAppUrl) {
+    res.status(400).json({ error: "Upload a JPEG, PNG, or WebP image up to 5 MB, enter message text, and configure the web app URL." });
+    return;
+  }
+
+  const recipients = await db.select({ chatId: telegramUsers.chatId }).from(telegramUsers);
+  const chatIds = [...new Set(recipients.map(({ chatId }) => chatId))];
+  let sent = 0;
+  let failed = 0;
+  for (const chatId of chatIds) {
+    try {
+      await telegramPhotoRequest(photo, {
+        chat_id: String(chatId),
+        caption,
+        reply_markup: JSON.stringify({
+          inline_keyboard: [[{ text: "Play Now", web_app: { url: webAppUrl } }]],
+        }),
+      });
+      sent += 1;
+    } catch (error) {
+      failed += 1;
+      logger.warn({ err: error, chatId }, "Telegram broadcast delivery failed");
+    }
+  }
+  res.json({ targeted: chatIds.length, sent, failed });
+});
 
 router.get("/telegram/admin/settings", async (req, res) => {
   if (!requireAdmin(req, res)) return;
@@ -930,6 +1217,50 @@ router.post("/telegram/admin/requests/:type/:id/:action", async (req, res) => {
   }
   await processAdminDecision(type, action, id, admin.adminChatId);
   res.json({ success: true });
+});
+
+function parseTelebirrDepositSms(text: string) {
+  const normalizedText = text.replace(/\r\n/g, "\n").replace(/\s+/g, " ").trim();
+  const amountMatch = normalizedText.match(/([0-9]+(?:\.[0-9]{1,2})?)\s*ብር/);
+  const transactionMatch = normalizedText.match(/(?:የሂሳብ\s+እንቅስቃሴ\s+ቁጥርዎ|transaction\s*(?:id|number))\s*[:#]?\s*([A-Z0-9]+)/i);
+  if (!amountMatch || !transactionMatch) return undefined;
+  const amount = Number(amountMatch[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return undefined;
+  return { amount: amount.toFixed(2), transactionId: transactionMatch[1].toUpperCase() };
+}
+
+router.post("/telegram/sms-webhook", async (req, res) => {
+  const configuredSecret = process.env["TELEGRAM_SMS_WEBHOOK_SECRET"]?.trim();
+  if (!configuredSecret || req.header("x-sms-webhook-secret") !== configuredSecret) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const body = (req.body && typeof req.body === "object" ? req.body : {}) as Record<string, unknown>;
+  const message = ["message", "msg", "text", "body", "messageBody", "content"].map((key) => body[key]).find((value): value is string => typeof value === "string") ?? Object.values(body).filter((value): value is string => typeof value === "string").join("\\n");
+  const sender = ["sender", "from", "incomingNumber", "senderNumber"].map((key) => body[key]).find((value): value is string => typeof value === "string") ?? message.match(/(?:from|sender)\s*:?\s*(\+?[0-9]+)/i)?.[1];
+  const allowedSender = process.env["TELEGRAM_SMS_SENDER"]?.trim();
+  if (allowedSender && sender && sender !== allowedSender) {
+    res.status(202).json({ matched: false });
+    return;
+  }
+  const parsed = parseTelebirrDepositSms(message);
+  if (!parsed) {
+    res.status(400).json({ error: "Unsupported Telebirr SMS format" });
+    return;
+  }
+  const [request] = await db.select({ id: depositRequests.id, amount: depositRequests.amount }).from(depositRequests)
+    .where(and(eq(depositRequests.status, "pending"), eq(depositRequests.transactionId, parsed.transactionId))).for("update").limit(1);
+  if (!request || Number(request.amount).toFixed(2) !== parsed.amount) {
+    res.status(202).json({ matched: false, transactionId: parsed.transactionId });
+    return;
+  }
+  const adminChatId = getAdminChatId();
+  if (!adminChatId) {
+    res.status(503).json({ error: "TELEGRAM_ADMIN_CHAT_ID is not configured" });
+    return;
+  }
+  await processAdminDecision("deposit", "approve", request.id, adminChatId);
+  res.json({ matched: true, requestId: request.id, amount: parsed.amount, transactionId: parsed.transactionId });
 });
 
 function sleep(milliseconds: number) {
@@ -1010,7 +1341,7 @@ export async function registerTelegramWebhook() {
       ? [{
           method: "setChatMenuButton",
           body: {
-            menu_button: { type: "web_app", text: "Flash Bingo", web_app: { url: webAppUrl } },
+            menu_button: { type: "web_app", text: "Venom Bingo", web_app: { url: webAppUrl } },
           },
         }]
       : []),
@@ -1018,7 +1349,7 @@ export async function registerTelegramWebhook() {
       method: "setMyCommands",
       body: {
         commands: [
-          { command: "start", description: "Flash Bingo ክፈት" },
+          { command: "start", description: "Venom Bingo ክፈት" },
           { command: "register", description: "Register" },
           { command: "play", description: "Play Bingo" },
           { command: "deposit", description: "Deposit" },
